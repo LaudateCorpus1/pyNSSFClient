@@ -60,10 +60,10 @@ class SampleShare():
 
     ## Calls web service to get the list of compression supported by the server
     #
-    # @return List of compression options available on the NSSF server 
+    # @return List of compression options available on the NSSF server
     #         (typically "zlib")
     def get_supported_compression(self):
-        request_url = ("https://%s?action=get_supported_compression&user=%s" % 
+        request_url = ("https://%s?action=get_supported_compression&user=%s" %
                       (self.url, self.username))
 
         opener = self.create_opener(request_url)
@@ -77,19 +77,23 @@ class SampleShare():
 
     ## Internal function to get the list of files from the server
     #
-    # @param from_date_utc The start date for the window from which to get 
+    # @param from_date_utc The start date for the window from which to get
     #                      files
     # @param to_date_utc The end date for the window from which to get files
-    # @param extra_attributes Extra attributes added to the URL (used for 
+    # @param extra_attributes Extra attributes added to the URL (used for
     #                         specifying the clean list)
     # @return List of items in hashtable form
-    def _get_file_list(self, 
-                       from_date_utc, 
-                       to_date_utc, 
+    def _get_file_list(self,
+                       from_date_utc,
+                       to_date_utc,
                        extra_attributes = ""):
-        request_url = ("https://%s?action=getlist&user=%s%s&from=%s&to=%s" % 
-            (self.url, self.username, extra_attributes, 
-            from_date_utc, to_date_utc))
+        request_url = ("https://%s?action=getlist&user=%s%s&from=%s&to=%s" %
+            (self.url, self.username, extra_attributes,
+            urllib.quote(from_date_utc), urllib.quote(to_date_utc)))
+
+        logger.info("Getting file list from %s to %s" % 
+                     (from_date_utc, to_date_utc))
+        logger.debug("request_url: %s" % request_url)
 
         opener = self.create_opener(request_url)
         response_data = opener.open(request_url).read()
@@ -103,8 +107,10 @@ class SampleShare():
                 output_file.write(response_data)
 
             # Decrypt response with GPG
-            subprocess.call(["gpg", "-o", filelist_filename, 
+            gpg_result = subprocess.call(["gpg", "-o", filelist_filename,
                              "--decrypt", encrypted_filename])
+            if 0 != gpg_result:
+                raise SampleShareError("Couldn't decrypt sample list")
 
             # Read decrypted response
             with open(filelist_filename, "r") as input_file:
@@ -116,7 +122,7 @@ class SampleShare():
         for file_row in file_rows:
             file_data = file_row.split(":")
             if len(file_data) == 2:
-                file_list.append({"file_identifier" : file_data[0], 
+                file_list.append({"file_identifier" : file_data[0],
                                   "file_size" : file_data[1]})
 
         return file_list
@@ -134,7 +140,7 @@ class SampleShare():
 
     ## Get the list of clean files in the given time range from the server
     #
-    # @param from_date_utc The start date for the window from which to get 
+    # @param from_date_utc The start date for the window from which to get
     #                      files
     # @param to_date_utc The end date for the window from which to get files
     # @return List of items in hashtable form
@@ -151,32 +157,36 @@ class SampleShare():
         hash_type = {32: "md5", 40: "sha1", 64: "sha256"} \
             .get(len(hash_value), None)
         if not hash_type:
-            raise SampleShareError("Unknown hash type: %s", hash_value)
+            raise SampleShareError("Unknown hash type: %s" % hash_value)
         return hash_type
-         
+
 
     ## Determines the number of bytes in a hash
     #
-    # @param hash The hash for which to determine the type
+    # @param hash The hash for which to determine the length
     # @return Number of bytes in the given hash
     @staticmethod
     def get_hash_length(hash_type):
-        hash_length = {"md5": 16, "sha1":20, "sha256":32}.get(len(hash), None)
+        hash_length = {"md5": 16, "sha1":20, "sha256":32}.get(hash_type, None)
         if not hash_length:
-            raise SampleShareError("Unknown hash type: %s", hash_type)
-        return hash_length            
+            raise SampleShareError("Unknown hash type: %s" % hash_type)
+        return hash_length
 
 
     ## Handles taking the file contents, decrypting, and decompressing them
     #
-    # @param destination_filename The filename of the final, decrypted and 
+    # @param destination_filename The filename of the final, decrypted and
     #                             decompressed file
     # @param file_data The encrypted, potentially compressed file contents
     # @param compression The compression used on the file data
     # @param file_identifier The expected hash of the file
     @staticmethod
-    def _process_file(destination_filename, file_data, 
+    def _process_file(destination_filename, file_data,
                       compression, file_identifier):
+        # Check for an error from the server
+        if len(file_data) < 200 and file_data.startswith("ERROR! => "):
+            raise SampleShareError("Server error: %s" % file_data[10:])
+
         with TempDir(".SampleShare") as temp_dir:
             encrypted_filename = os.path.join(temp_dir, "encrypted.gpg")
             decrypted_filename = os.path.join(temp_dir, "decrypted")
@@ -190,8 +200,12 @@ class SampleShare():
                 output_file.write(file_data)
 
             # Decrypt response with GPG
-            subprocess.call(["gpg", "-o", decrypted_filename, 
+            gpg_result = subprocess.call(["gpg", "-o", decrypted_filename,
                              "--decrypt", encrypted_filename])
+            if 0 != gpg_result:
+                # The server may have returned an error
+                raise SampleShareError("Unable to decrypt: gpg = %d" %
+                                       gpg_result)
 
             # If it's compressed, decompress it
             if not compression:
@@ -218,7 +232,7 @@ class SampleShare():
             elif "sha256" == hash_type:
                 hash_generator = hashlib.sha256()
             else:
-                raise SampleShareError("Unknown hash type: %s", hash_type)
+                raise SampleShareError("Unknown hash type: %s" % hash_type)
 
             with open(decompressed_filename, "rb") as input_file:
                 # TODO: Do this in chunks
@@ -227,10 +241,10 @@ class SampleShare():
 
             if file_hash.lower() != file_identifier.lower():
                 raise SampleShareError(
-                    "Hash of file %s doesn't match file identifier %s", 
-                    file_hash, file_identifier)
+                    "Hash of file %s doesn't match file identifier %s" %
+                    (file_hash, file_identifier))
 
-            # Create a hard link that effectively copies the output to the 
+            # Create a hard link that effectively copies the output to the
             # destination location
             if os.path.exists(destination_filename):
                 os.unlink(destination_filename)
@@ -241,23 +255,23 @@ class SampleShare():
     #
     # @param file_identifier The hash of the file to download
     # @param destination_filename The filename to which to download it
-    # @param compression The compression to use.  Must be supported by 
+    # @param compression The compression to use.  Must be supported by
     #                    server.  Typically: None or "zlib"
-    def get_file(self, file_identifier, 
+    def get_file(self, file_identifier,
                  destination_filename, compression=None):
-        logger.debug("Getting file with hash %s to %s with compression %s", 
+        logger.debug("Getting file with hash %s to %s with compression %s",
                      file_identifier, destination_filename, compression)
-        compression_option = ("&compression=%s" % (compression) 
+        compression_option = ("&compression=%s" % (compression)
                               if compression else "")
         hash_type = SampleShare.get_hash_type(file_identifier)
-        request_url = ("https://%s?action=getfile&user=%s&%s=%s%s" % 
-                      (self.url, self.username, hash_type, 
+        request_url = ("https://%s?action=getfile&user=%s&%s=%s%s" %
+                      (self.url, self.username, hash_type,
                       file_identifier, compression_option))
 
         opener = self.create_opener(request_url)
         response_data = opener.open(request_url).read()
 
-        SampleShare._process_file(destination_filename, response_data, 
+        SampleShare._process_file(destination_filename, response_data,
                                   compression, file_identifier)
 
 
@@ -266,16 +280,19 @@ class SampleShare():
     # @param file_identifiers The list of hashes of the files to download
     # @param destination_directory The location to store the files
     # @param compression The compression to use (None, "zlib")
-    # @param extra_attributes Any extra parameters to put on the HTTP POST 
+    # @param extra_attributes Any extra parameters to put on the HTTP POST
     #                         request
-    def _get_files_by_list(self, file_identifiers, destination_directory, 
+    def _get_files_by_list(self, file_identifiers, destination_directory,
                            compression=None, extra_attributes = ""):
-        logger.debug("Getting file list %s to %s with compression %s", 
+        logger.debug("Getting file list %s to %s with compression %s",
                      file_identifiers, destination_directory, compression)
 
         # If there's nothing to do, return
         if len(file_identifiers) < 1:
             return
+
+        # Make sure they're all lower-case, for later comparison purposes
+        file_identifiers = [x.lower() for x in file_identifiers]
 
         # Verify that all identifiers are the same type
         expected_length = len(file_identifiers[0])
@@ -286,7 +303,7 @@ class SampleShare():
         hash_type = SampleShare.get_hash_type(file_identifiers[0])
         logger.debug("hash type = %s", hash_type)
 
-        # Per spec, "Legacy clients without support for sha1/sha256 will 
+        # Per spec, "Legacy clients without support for sha1/sha256 will
         # use 'md5list'"
         hash_list_arg = ':'.join(file_identifiers)
         if hash_type == "md5":
@@ -296,25 +313,25 @@ class SampleShare():
         logger.debug("post_data: %s", post_data)
         post_data = urllib.urlencode(post_data)
 
-        compression_option = ("&compression=%s" % (compression) 
+        compression_option = ("&compression=%s" % (compression)
                               if compression else "")
 
-        request_url = ("https://%s?action=getfile_by_list&user=%s&hash_type=%s%s%s" % 
-                      (self.url, self.username, hash_type, 
+        request_url = ("https://%s?action=getfile_by_list&user=%s&hash_type=%s%s%s" %
+                      (self.url, self.username, hash_type,
                       compression_option, extra_attributes))
         logger.debug("request_url: %s", request_url)
         opener = self.create_opener(request_url)
         response = opener.open(request_url, post_data)
 
-        file_identifier_length = (SampleShare.get_hash_length(hash_type) * 
+        file_identifier_length = (SampleShare.get_hash_length(hash_type) *
                                   CHARS_PER_BYTE)
 
-        # Loop through, expecting each of the file IDs requested (they may not 
+        # Loop through, expecting each of the file IDs requested (they may not
         # return the files in the same order, so ignore the iterator)
         for file_identifier in file_identifiers:
-            # Per doc at https://sampleshare.norman.com/signup/framework.php, 
+            # Per doc at https://sampleshare.norman.com/signup/framework.php,
             # response is formatted like:
-            # <10 byte 0-padded file size><hash of file (length based on 
+            # <10 byte 0-padded file size><hash of file (length based on
             # requested hash type><file data>...
 
             # Get the file size
@@ -331,19 +348,19 @@ class SampleShare():
             logger.debug("processing %s", file_identifier)
 
             # Make sure that the file is an expected file
-            if not file_identifier in file_identifiers:
+            if not file_identifier.lower() in file_identifiers:
                 logger.error("Unknown file: %s", file_identifier)
                 file_data = response.read(file_length)
                 if len(file_data) != file_length:
-                    raise SampleShareError("Unable to read file data for " + 
+                    raise SampleShareError("Unable to read file data for " +
                                            "unknown file")
-                raise SampleShareError("Result contains unexpected file: %s", 
+                raise SampleShareError("Result contains unexpected file: %s" %
                                        file_identifier)
 
-            destination_filename = os.path.join(destination_directory, 
+            destination_filename = os.path.join(destination_directory,
                                                 file_identifier)
-            logger.debug("Getting file with hash %s (%d bytes) to %s " + 
-                         "with compression %s", file_identifier, file_length, 
+            logger.debug("Getting file with hash %s (%d bytes) to %s " +
+                         "with compression %s", file_identifier, file_length,
                          destination_filename, compression)
 
             # Get the file data
@@ -352,13 +369,13 @@ class SampleShare():
                 raise SampleShareError("Unable to read file data")
 
             try:
-                SampleShare._process_file(destination_filename, file_data, 
+                SampleShare._process_file(destination_filename, file_data,
                                           compression, file_identifier)
             except StandardError as ex:
-                logger.error("Problem processing file %s: %s", 
+                logger.error("Problem processing file %s: %s",
                              file_identifier, ex)
-                raise SampleShareError("Couldn't process file %s: %s", 
-                                       file_identifier, ex)
+                raise SampleShareError("Couldn't process file %s: %s" %
+                                       (file_identifier, ex))
 
 
     ## Downloads a set of malware files
@@ -366,9 +383,9 @@ class SampleShare():
     # @param file_identifiers The list of hashes of the files to download
     # @param destination_directory The location to store the files
     # @param compression The compression to use (None, "zlib")
-    def get_malware_files_by_list(self, file_identifiers, 
+    def get_malware_files_by_list(self, file_identifiers,
                                   destination_directory, compression=None):
-        self._get_files_by_list(file_identifiers, destination_directory, 
+        self._get_files_by_list(file_identifiers, destination_directory,
                                 compression)
 
 
@@ -377,16 +394,41 @@ class SampleShare():
     # @param file_identifiers The list of hashes of the files to download
     # @param destination_directory The location to store the files
     # @param compression The compression to use (None, "zlib")
-    def get_clean_files_by_list(self, 
-                                file_identifiers, 
-                                destination_directory, 
+    def get_clean_files_by_list(self,
+                                file_identifiers,
+                                destination_directory,
                                 compression=None):
-        self._get_files_by_list(file_identifiers, 
-                                destination_directory, 
-                                compression, 
+        self._get_files_by_list(file_identifiers,
+                                destination_directory,
+                                compression,
                                 "&clean=true")
 
 
+## Command line parser function for downloading files
+#
+# @param args The command line arguments
+def download_list(args):
+    ss = SampleShare("sampleshare.norman.com/auth/sampleshare.php",
+                     args.username,
+                     args.password)
+    ss.get_malware_files_by_list(args.hash,
+                                 args.destination,
+                                 compression=args.compression)
+
+
+## Command line parser function for listing files
+#
+# @param args The command line arguments
+def list_samples(args):
+    ss = SampleShare("sampleshare.norman.com/auth/sampleshare.php",
+                     args.username,
+                     args.password)
+    print ss.get_malware_list(args.start, args.end)
+
+
+# Example command lines:
+#  - sample_share.py download_malware --hash 8F81F9C502B844456D607DA7794B66CF --destination samples --compression zlib
+#  - sample_share.py list_samples 2013-01-19\ 00:00:00 2013-01-21\ 00:00:00
 if __name__ == '__main__':
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setLevel(logging.DEBUG)
@@ -395,12 +437,35 @@ if __name__ == '__main__':
     logger.addHandler(stdout_handler)
     logger.setLevel(logging.DEBUG)
 
-    ss = SampleShare("sampleshare.norman.com/auth/sampleshare.php", 
-    "<usename>", 
-    "<password>")
+    # Pull the creds from the environment
+    username = os.environ.get("nssf_username", None)
+    password = os.environ.get("nssf_password", None)
 
-    ss.get_malware_files_by_list(["<hash1>", 
-                                  "<hash2>", 
-                                  "<hash3>"], 
-                                  "<destination dir>", 
-                                 compression="zlib")
+    logger.debug("Using username: %s, password: %s", username, password)
+
+    import argparse
+    parser = argparse.ArgumentParser(description='Python NSSF client')
+    parser.add_argument('--username', default=username, help='Username')
+    parser.add_argument('--password', default=password, help='Password')
+    subparsers = parser.add_subparsers(help="sub-command help")
+
+    parser_get_by_list = subparsers.add_parser("download_malware",
+                                               help="Download set of malware")
+    parser_get_by_list.add_argument('--hash', action='append',
+                                    required=True, help='Hash to download')
+    parser_get_by_list.add_argument('--destination', required=True,
+                                    help='Destination directory for files')
+    parser_get_by_list.add_argument('--compression', default=None,
+                                    help='Compression to use when " \
+                                    "downloading samples')
+    parser_get_by_list.set_defaults(func=download_list)
+
+    parser_list_samples = subparsers.add_parser("list_samples",
+                                                help="Lists samples")
+    parser_list_samples.add_argument("start", help="Start date")
+    parser_list_samples.add_argument("end", help="End date")
+    parser_list_samples.set_defaults(func=list_samples)
+
+    args = parser.parse_args()
+    args.func(args)
+
